@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
                                QStatusBar, QPushButton, QInputDialog, QMenu, QMessageBox)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtCore import Qt, QDir, QTimer, QPoint
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QDragEnterEvent, QDropEvent, QDrag
 import markdown2
 from datetime import datetime
 
@@ -26,14 +26,50 @@ class ObsidianClone(QMainWindow):
         self.load_tree_view()
         self.setup_autosave()
 
-    def init_ui(self):
+    from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtCore import QObject, Slot
+
+class Bridge(QObject):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+
+    @Slot(str)
+    def openNote(self, noteName):
+        for root, _, files in os.walk(self.parent.vault_path):
+            for file in files:
+                if file.endswith(".md") and os.path.splitext(file)[0] == noteName:
+                    file_path = os.path.join(root, file)
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    self.parent.editor.setPlainText(content)
+                    self.parent.current_file = file_path
+                    self.parent.update_tags_panel(content)
+                    self.parent.update_backlinks_panel(noteName)
+                    return
+
+
+def init_ui(self):
+        self.backlinks_panel = QTreeWidget()
+        self.backlinks_panel.setHeaderHidden(True)
+        self.backlinks_label = QLabel("Backlinks")
+        self.backlinks_label.setAlignment(Qt.AlignCenter)
+        self.backlinks_widget = QWidget()
+        backlinks_layout = QVBoxLayout(self.backlinks_widget)
+        backlinks_layout.addWidget(self.backlinks_label)
+        backlinks_layout.addWidget(self.backlinks_panel)
         splitter = QSplitter(Qt.Horizontal)
 
         self.tree_view = QTreeWidget()
         self.tree_view.setHeaderHidden(True)
+        self.tree_view.setDragEnabled(True)
+        self.tree_view.setAcceptDrops(True)
+        self.tree_view.setDropIndicatorShown(True)
+        self.tree_view.setDragDropMode(QTreeWidget.InternalMove)
         self.tree_view.itemDoubleClicked.connect(self.open_note)
         self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree_view.customContextMenuRequested.connect(self.show_context_menu)
+        self.tree_view.dropEvent = self.handle_drop_event
 
         self.new_note_button = QPushButton("+ New Note")
         self.new_note_button.clicked.connect(self.create_new_note)
@@ -47,6 +83,7 @@ class ObsidianClone(QMainWindow):
         self.editor.textChanged.connect(self.update_preview)
 
         self.preview = QWebEngineView()
+        self.channel = QWebChannel()
 
         editor_preview_split = QSplitter(Qt.Vertical)
         editor_preview_split.addWidget(self.editor)
@@ -63,7 +100,11 @@ class ObsidianClone(QMainWindow):
 
         right_splitter = QSplitter(Qt.Vertical)
         right_splitter.addWidget(editor_preview_split)
-        right_splitter.addWidget(self.tags_widget)
+        right_right_splitter = QSplitter(Qt.Vertical)
+        right_right_splitter.addWidget(self.tags_widget)
+        right_right_splitter.addWidget(self.backlinks_widget)
+        right_right_splitter.setSizes([50, 50])
+        right_splitter.addWidget(right_right_splitter)
         right_splitter.setSizes([500, 100])
 
         splitter.addWidget(file_panel)
@@ -100,6 +141,26 @@ class ObsidianClone(QMainWindow):
         add_items(root_item, self.vault_path)
         root_item.setExpanded(True)
 
+    def handle_drop_event(self, event: QDropEvent):
+        target_item = self.tree_view.itemAt(event.position().toPoint())
+        if not target_item:
+            event.ignore()
+            return
+        dest_path = target_item.data(0, Qt.UserRole)
+        if not os.path.isdir(dest_path):
+            dest_path = os.path.dirname(dest_path)
+
+        selected_items = self.tree_view.selectedItems()
+        for item in selected_items:
+            src_path = item.data(0, Qt.UserRole)
+            if os.path.exists(src_path):
+                new_path = os.path.join(dest_path, os.path.basename(src_path))
+                if src_path != new_path:
+                    self.update_links_on_rename(src_path, new_path)
+                    os.rename(src_path, new_path)
+        self.load_tree_view()
+        event.accept()
+
     def open_note(self, item, column):
         path = item.data(0, Qt.UserRole)
         if os.path.isfile(path) and path.endswith(".md"):
@@ -108,12 +169,69 @@ class ObsidianClone(QMainWindow):
             self.editor.setPlainText(content)
             self.current_file = path
             self.update_tags_panel(content)
+            self.update_backlinks_panel(os.path.splitext(os.path.basename(path))[0])
 
     def update_preview(self):
         markdown_text = self.editor.toPlainText()
-        html = markdown2.markdown(markdown_text)
+
+        def link_replacer(match):
+            content = match.group(1)
+            if '|' in content:
+                target, label = content.split('|', 1)
+            else:
+                target, label = content, content
+            return f'<a href="#" style="color: blue; text-decoration: underline;" onclick=\"window.noteOpen(\'{target}\')\">{label}</a>'
+
+        wikilink_pattern = re.compile(r'\[\[(.*?)\]\]')
+        processed_text = wikilink_pattern.sub(link_replacer, markdown_text)
+
+        script = """
+        <script>
+        window.noteOpen = function(noteName) {
+            new QWebChannel(qt.webChannelTransport, function(channel) {
+                channel.objects.bridge.openNote(noteName);
+            });
+        };
+        </script>
+        """
+
+        html = f"""
+        <html>
+        <head><style>a:hover {{ color: darkblue; }}</style></head>
+        <body>{markdown2.markdown(processed_text)}{script}</body>
+        </html>
+        """
         self.preview.setHtml(html)
         self.update_tags_panel(markdown_text)
+
+    def update_backlinks_panel(self, current_note):
+        self.backlinks_panel.clear()
+        self.backlinks_panel.itemClicked.connect(self.open_backlink_note)
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                if file.endswith('.md'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        basename = os.path.basename(file_path)
+                        if ((f'[[{current_note}]]' in content or f'![[{current_note}]]' in content)
+                                and os.path.splitext(basename)[0] != current_note):
+                            item = QTreeWidgetItem([os.path.splitext(basename)[0]])
+                            item.setData(0, Qt.UserRole, file_path)
+                            self.backlinks_panel.addTopLevelItem(item)
+                    except Exception as e:
+                        print(f"Failed to read backlinks in {file_path}: {e}")
+
+    def open_backlink_note(self, item):
+        path = item.data(0, Qt.UserRole)
+        if os.path.isfile(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.editor.setPlainText(content)
+            self.current_file = path
+            self.update_tags_panel(content)
+            self.update_backlinks_panel(os.path.splitext(os.path.basename(path))[0])
 
     def update_tags_panel(self, text):
         tags = sorted(set(re.findall(r'(?<!\w)#(\w+)', text)))
@@ -122,6 +240,23 @@ class ObsidianClone(QMainWindow):
             item = QTreeWidgetItem([f"#{tag}"])
             item.setForeground(0, Qt.darkBlue)
             self.tags_panel.addTopLevelItem(item)
+
+    def update_links_on_rename(self, old_path, new_path):
+        old_name = os.path.splitext(os.path.basename(old_path))[0]
+        new_name = os.path.splitext(os.path.basename(new_path))[0]
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                if file.endswith('.md'):
+                    file_path = os.path.join(root, file)
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        updated = re.sub(rf'\[\[{re.escape(old_name)}\]\]', f'[[{new_name}]]', content)
+                        if content != updated:
+                            with open(file_path, 'w', encoding='utf-8') as f:
+                                f.write(updated)
+                    except Exception as e:
+                        print(f"Failed to update links in {file_path}: {e}")
 
     def setup_autosave(self):
         self.autosave_timer = QTimer(self)
@@ -169,6 +304,41 @@ class ObsidianClone(QMainWindow):
                 name, ok = QInputDialog.getText(self, "Create Folder", "Folder name:")
                 if ok:
                     os.makedirs(os.path.join(path, name), exist_ok=True)
+                    self.load_tree_view()
+            elif action == delete_action:
+                try:
+                    os.rmdir(path)
+                    self.load_tree_view()
+                except OSError:
+                    QMessageBox.warning(self, "Error", "Folder must be empty to delete.")
+            elif action == rename_action:
+                new_name, ok = QInputDialog.getText(self, "Rename Folder", "New folder name:")
+                if ok:
+                    new_path = os.path.join(os.path.dirname(path), new_name)
+                    os.rename(path, new_path)
+                    self.load_tree_view()
+
+        elif os.path.isfile(path):
+            move_action = menu.addAction("Move Note...")
+            rename_action = menu.addAction("Rename Note")
+            action = menu.exec(self.tree_view.mapToGlobal(point))
+            if action == move_action:
+                dest, ok = QInputDialog.getText(self, "Move Note", "Enter destination folder:")
+                if ok:
+                    dest_path = os.path.join(self.vault_path, dest)
+                    os.makedirs(dest_path, exist_ok=True)
+                    new_path = os.path.join(dest_path, os.path.basename(path))
+                    self.update_links_on_rename(path, new_path)
+                    os.rename(path, new_path)
+                    self.load_tree_view()
+            elif action == rename_action:
+                new_name, ok = QInputDialog.getText(self, "Rename Note", "New note name:")
+                if ok:
+                    new_path = os.path.join(os.path.dirname(path), new_name)
+                    if not new_path.endswith(".md"):
+                        new_path += ".md"
+                    self.update_links_on_rename(path, new_path)
+                    os.rename(path, new_path)
                     self.load_tree_view()
             elif action == delete_action:
                 try:
