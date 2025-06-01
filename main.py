@@ -2,10 +2,12 @@ import sys
 import os
 import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
-                               QSplitter, QTextEdit, QListWidget, QVBoxLayout, QWidget, QLabel)
+                               QSplitter, QTextEdit, QListWidget, QVBoxLayout, QWidget, QLabel,
+                               QListWidgetItem, QStatusBar, QPushButton, QHBoxLayout)
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtCore import Qt, QDir
+from PySide6.QtCore import Qt, QDir, QTimer
 import markdown2
+from datetime import datetime
 
 
 class ObsidianClone(QMainWindow):
@@ -18,15 +20,25 @@ class ObsidianClone(QMainWindow):
         if not self.vault_path:
             sys.exit(0)
 
+        self.current_file = None
         self.init_ui()
         self.load_file_list()
+        self.setup_autosave()
 
     def init_ui(self):
         splitter = QSplitter(Qt.Horizontal)
 
-        # Sidebar for file list
+        # Sidebar for file list and new note button
         self.file_list = QListWidget()
         self.file_list.itemClicked.connect(self.open_note)
+
+        self.new_note_button = QPushButton("+ New Note")
+        self.new_note_button.clicked.connect(self.create_new_note)
+
+        file_panel = QWidget()
+        file_layout = QVBoxLayout(file_panel)
+        file_layout.addWidget(self.new_note_button)
+        file_layout.addWidget(self.file_list)
 
         # Editor and Preview
         self.editor = QTextEdit()
@@ -52,7 +64,7 @@ class ObsidianClone(QMainWindow):
         right_splitter.addWidget(self.tags_widget)
         right_splitter.setSizes([500, 100])
 
-        splitter.addWidget(self.file_list)
+        splitter.addWidget(file_panel)
         splitter.addWidget(right_splitter)
         splitter.setSizes([200, 800])
 
@@ -61,6 +73,10 @@ class ObsidianClone(QMainWindow):
         layout.addWidget(splitter)
 
         self.setCentralWidget(central_widget)
+
+        # Status bar
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
 
     def load_file_list(self):
         self.file_list.clear()
@@ -86,7 +102,37 @@ class ObsidianClone(QMainWindow):
         tags = sorted(set(re.findall(r'(?<!\w)#(\w+)', text)))
         self.tags_panel.clear()
         for tag in tags:
-            self.tags_panel.addItem(f"#{tag}")
+            item = QListWidgetItem(f"#{tag}")
+            item.setForeground(Qt.darkBlue)
+            item.setBackground(Qt.lightGray)
+            item.setFont(self.editor.font())
+            self.tags_panel.addItem(item)
+
+    def setup_autosave(self):
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.timeout.connect(self.autosave_note)
+        self.autosave_timer.start(5000)  # Every 5 seconds
+
+    def autosave_note(self):
+        if self.current_file:
+            try:
+                with open(self.current_file, 'w', encoding='utf-8') as f:
+                    f.write(self.editor.toPlainText())
+                self.status_bar.showMessage("Note auto-saved", 2000)
+            except Exception as e:
+                print(f"Autosave failed: {e}")
+                self.status_bar.showMessage("Autosave failed", 2000)
+
+    def create_new_note(self):
+        filename = f"note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        file_path = os.path.join(self.vault_path, filename)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write("# New Note\n")
+        self.load_file_list()
+        items = self.file_list.findItems(filename, Qt.MatchExactly)
+        if items:
+            self.file_list.setCurrentItem(items[0])
+            self.open_note(items[0])
 
 
 def main():
