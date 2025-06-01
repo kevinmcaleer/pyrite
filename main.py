@@ -2,10 +2,11 @@ import sys
 import os
 import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
-                               QSplitter, QTextEdit, QListWidget, QVBoxLayout, QWidget, QLabel,
-                               QListWidgetItem, QStatusBar, QPushButton, QHBoxLayout, QInputDialog)
+                               QSplitter, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QLabel,
+                               QStatusBar, QPushButton, QInputDialog, QMenu, QMessageBox)
 from PySide6.QtWebEngineWidgets import QWebEngineView
-from PySide6.QtCore import Qt, QDir, QTimer
+from PySide6.QtCore import Qt, QDir, QTimer, QPoint
+from PySide6.QtGui import QIcon
 import markdown2
 from datetime import datetime
 
@@ -22,15 +23,17 @@ class ObsidianClone(QMainWindow):
 
         self.current_file = None
         self.init_ui()
-        self.load_file_list()
+        self.load_tree_view()
         self.setup_autosave()
 
     def init_ui(self):
         splitter = QSplitter(Qt.Horizontal)
 
-        # Sidebar for file list and new note button
-        self.file_list = QListWidget()
-        self.file_list.itemClicked.connect(self.open_note)
+        self.tree_view = QTreeWidget()
+        self.tree_view.setHeaderHidden(True)
+        self.tree_view.itemDoubleClicked.connect(self.open_note)
+        self.tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree_view.customContextMenuRequested.connect(self.show_context_menu)
 
         self.new_note_button = QPushButton("+ New Note")
         self.new_note_button.clicked.connect(self.create_new_note)
@@ -38,9 +41,8 @@ class ObsidianClone(QMainWindow):
         file_panel = QWidget()
         file_layout = QVBoxLayout(file_panel)
         file_layout.addWidget(self.new_note_button)
-        file_layout.addWidget(self.file_list)
+        file_layout.addWidget(self.tree_view)
 
-        # Editor and Preview
         self.editor = QTextEdit()
         self.editor.textChanged.connect(self.update_preview)
 
@@ -50,8 +52,8 @@ class ObsidianClone(QMainWindow):
         editor_preview_split.addWidget(self.editor)
         editor_preview_split.addWidget(self.preview)
 
-        # Right-side tags panel
-        self.tags_panel = QListWidget()
+        self.tags_panel = QTreeWidget()
+        self.tags_panel.setHeaderHidden(True)
         self.tags_label = QLabel("Tags")
         self.tags_label.setAlignment(Qt.AlignCenter)
         self.tags_widget = QWidget()
@@ -66,33 +68,46 @@ class ObsidianClone(QMainWindow):
 
         splitter.addWidget(file_panel)
         splitter.addWidget(right_splitter)
-        splitter.setSizes([200, 800])
+        splitter.setSizes([300, 700])
 
         central_widget = QWidget()
         layout = QVBoxLayout(central_widget)
         layout.addWidget(splitter)
-
         self.setCentralWidget(central_widget)
 
-        # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
-    def load_file_list(self):
-        self.file_list.clear()
-        for root, _, files in os.walk(self.vault_path):
-            for file in files:
-                if file.endswith(".md"):
-                    relative_path = os.path.relpath(os.path.join(root, file), self.vault_path)
-                    self.file_list.addItem(relative_path)
+    def load_tree_view(self):
+        self.tree_view.clear()
 
-    def open_note(self, item):
-        file_path = os.path.join(self.vault_path, item.text())
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        self.editor.setPlainText(content)
-        self.current_file = file_path
-        self.update_tags_panel(content)
+        def add_items(parent_item, path):
+            for entry in sorted(os.listdir(path)):
+                full_path = os.path.join(path, entry)
+                item = QTreeWidgetItem([entry])
+                item.setData(0, Qt.UserRole, full_path)
+                if os.path.isdir(full_path):
+                    item.setIcon(0, QIcon.fromTheme("folder"))
+                    add_items(item, full_path)
+                else:
+                    item.setIcon(0, QIcon.fromTheme("text-x-generic"))
+                parent_item.addChild(item)
+
+        root_item = QTreeWidgetItem([os.path.basename(self.vault_path)])
+        root_item.setData(0, Qt.UserRole, self.vault_path)
+        root_item.setIcon(0, QIcon.fromTheme("folder"))
+        self.tree_view.addTopLevelItem(root_item)
+        add_items(root_item, self.vault_path)
+        root_item.setExpanded(True)
+
+    def open_note(self, item, column):
+        path = item.data(0, Qt.UserRole)
+        if os.path.isfile(path) and path.endswith(".md"):
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.editor.setPlainText(content)
+            self.current_file = path
+            self.update_tags_panel(content)
 
     def update_preview(self):
         markdown_text = self.editor.toPlainText()
@@ -104,16 +119,14 @@ class ObsidianClone(QMainWindow):
         tags = sorted(set(re.findall(r'(?<!\w)#(\w+)', text)))
         self.tags_panel.clear()
         for tag in tags:
-            item = QListWidgetItem(f"#{tag}")
-            item.setForeground(Qt.darkBlue)
-            item.setBackground(Qt.lightGray)
-            item.setFont(self.editor.font())
-            self.tags_panel.addItem(item)
+            item = QTreeWidgetItem([f"#{tag}"])
+            item.setForeground(0, Qt.darkBlue)
+            self.tags_panel.addTopLevelItem(item)
 
     def setup_autosave(self):
         self.autosave_timer = QTimer(self)
         self.autosave_timer.timeout.connect(self.autosave_note)
-        self.autosave_timer.start(5000)  # Every 5 seconds
+        self.autosave_timer.start(5000)
 
     def autosave_note(self):
         if self.current_file:
@@ -137,13 +150,59 @@ class ObsidianClone(QMainWindow):
         file_path = os.path.join(subdir, filename)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write("# New Note\n")
-        self.load_file_list()
 
-        relative_path = os.path.relpath(file_path, self.vault_path)
-        items = self.file_list.findItems(relative_path, Qt.MatchExactly)
-        if items:
-            self.file_list.setCurrentItem(items[0])
-            self.open_note(items[0])
+        self.load_tree_view()
+
+    def show_context_menu(self, point: QPoint):
+        item = self.tree_view.itemAt(point)
+        if not item:
+            return
+        path = item.data(0, Qt.UserRole)
+        menu = QMenu(self)
+
+        if os.path.isdir(path):
+            create_action = menu.addAction("Create Folder")
+            delete_action = menu.addAction("Delete Folder")
+            rename_action = menu.addAction("Rename Folder")
+            action = menu.exec(self.tree_view.mapToGlobal(point))
+            if action == create_action:
+                name, ok = QInputDialog.getText(self, "Create Folder", "Folder name:")
+                if ok:
+                    os.makedirs(os.path.join(path, name), exist_ok=True)
+                    self.load_tree_view()
+            elif action == delete_action:
+                try:
+                    os.rmdir(path)
+                    self.load_tree_view()
+                except OSError:
+                    QMessageBox.warning(self, "Error", "Folder must be empty to delete.")
+            elif action == rename_action:
+                new_name, ok = QInputDialog.getText(self, "Rename Folder", "New folder name:")
+                if ok:
+                    new_path = os.path.join(os.path.dirname(path), new_name)
+                    os.rename(path, new_path)
+                    self.load_tree_view()
+
+        elif os.path.isfile(path):
+            move_action = menu.addAction("Move Note...")
+            rename_action = menu.addAction("Rename Note")
+            action = menu.exec(self.tree_view.mapToGlobal(point))
+            if action == move_action:
+                dest, ok = QInputDialog.getText(self, "Move Note", "Enter destination folder:")
+                if ok:
+                    dest_path = os.path.join(self.vault_path, dest)
+                    os.makedirs(dest_path, exist_ok=True)
+                    new_path = os.path.join(dest_path, os.path.basename(path))
+                    os.rename(path, new_path)
+                    self.load_tree_view()
+            elif action == rename_action:
+                new_name, ok = QInputDialog.getText(self, "Rename Note", "New note name:")
+                if ok:
+                    new_path = os.path.join(os.path.dirname(path), new_name)
+                    if not new_path.endswith(".md"):
+                        new_path += ".md"
+                    os.rename(path, new_path)
+                    self.load_tree_view()
 
 
 def main():
