@@ -1,7 +1,8 @@
 import sys
 import os
+import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
-                               QSplitter, QTextEdit, QListWidget, QVBoxLayout, QWidget)
+                               QSplitter, QTextEdit, QListWidget, QVBoxLayout, QWidget, QLabel)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtCore import Qt, QDir
 import markdown2
@@ -37,8 +38,22 @@ class ObsidianClone(QMainWindow):
         editor_preview_split.addWidget(self.editor)
         editor_preview_split.addWidget(self.preview)
 
+        # Right-side tags panel
+        self.tags_panel = QListWidget()
+        self.tags_label = QLabel("Tags")
+        self.tags_label.setAlignment(Qt.AlignCenter)
+        self.tags_widget = QWidget()
+        tags_layout = QVBoxLayout(self.tags_widget)
+        tags_layout.addWidget(self.tags_label)
+        tags_layout.addWidget(self.tags_panel)
+
+        right_splitter = QSplitter(Qt.Vertical)
+        right_splitter.addWidget(editor_preview_split)
+        right_splitter.addWidget(self.tags_widget)
+        right_splitter.setSizes([500, 100])
+
         splitter.addWidget(self.file_list)
-        splitter.addWidget(editor_preview_split)
+        splitter.addWidget(right_splitter)
         splitter.setSizes([200, 800])
 
         central_widget = QWidget()
@@ -59,11 +74,19 @@ class ObsidianClone(QMainWindow):
             content = f.read()
         self.editor.setPlainText(content)
         self.current_file = file_path
+        self.update_tags_panel(content)
 
     def update_preview(self):
         markdown_text = self.editor.toPlainText()
         html = markdown2.markdown(markdown_text)
         self.preview.setHtml(html)
+        self.update_tags_panel(markdown_text)
+
+    def update_tags_panel(self, text):
+        tags = sorted(set(re.findall(r'(?<!\w)#(\w+)', text)))
+        self.tags_panel.clear()
+        for tag in tags:
+            self.tags_panel.addItem(f"#{tag}")
 
 
 def main():
