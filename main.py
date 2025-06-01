@@ -3,7 +3,7 @@ import os
 import re
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
                                QSplitter, QTextEdit, QListWidget, QVBoxLayout, QWidget, QLabel,
-                               QListWidgetItem, QStatusBar, QPushButton, QHBoxLayout)
+                               QListWidgetItem, QStatusBar, QPushButton, QHBoxLayout, QInputDialog)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtCore import Qt, QDir, QTimer
 import markdown2
@@ -80,9 +80,11 @@ class ObsidianClone(QMainWindow):
 
     def load_file_list(self):
         self.file_list.clear()
-        for file in os.listdir(self.vault_path):
-            if file.endswith(".md"):
-                self.file_list.addItem(file)
+        for root, _, files in os.walk(self.vault_path):
+            for file in files:
+                if file.endswith(".md"):
+                    relative_path = os.path.relpath(os.path.join(root, file), self.vault_path)
+                    self.file_list.addItem(relative_path)
 
     def open_note(self, item):
         file_path = os.path.join(self.vault_path, item.text())
@@ -124,12 +126,21 @@ class ObsidianClone(QMainWindow):
                 self.status_bar.showMessage("Autosave failed", 2000)
 
     def create_new_note(self):
+        folder, ok = QInputDialog.getText(self, "Create New Note", "Enter folder path (or leave empty for root):")
+        if not ok:
+            return
+
+        subdir = os.path.join(self.vault_path, folder) if folder else self.vault_path
+        os.makedirs(subdir, exist_ok=True)
+
         filename = f"note_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-        file_path = os.path.join(self.vault_path, filename)
+        file_path = os.path.join(subdir, filename)
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write("# New Note\n")
         self.load_file_list()
-        items = self.file_list.findItems(filename, Qt.MatchExactly)
+
+        relative_path = os.path.relpath(file_path, self.vault_path)
+        items = self.file_list.findItems(relative_path, Qt.MatchExactly)
         if items:
             self.file_list.setCurrentItem(items[0])
             self.open_note(items[0])
